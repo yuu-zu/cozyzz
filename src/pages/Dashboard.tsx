@@ -284,7 +284,16 @@ export default function Dashboard() {
               entries={filteredEntries}
               onEdit={(e) => { setEditEntry(e); setShowEditor(true); }}
               onDelete={moveToTrash}
-              onShare={() => setTab("friends")}
+              onShare={(entry) => {
+                localStorage.setItem(
+                  "cozy_share_target",
+                  JSON.stringify({
+                    diaryId: entry.id,
+                  }),
+                );
+                window.dispatchEvent(new Event("trigger_share_diary"));
+                setTab("shared");
+              }}
             />
           </>
         )}
@@ -299,7 +308,7 @@ export default function Dashboard() {
         )}
         {tab === "shared" && (
           <div className="space-y-4">
-            <SendDiary />
+            <SendDiary entries={activeEntries} />
           </div>
         )}
         {tab === "my-diaries" && <MyDiaries />}

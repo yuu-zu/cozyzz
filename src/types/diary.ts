@@ -38,6 +38,16 @@ export interface SharedDiary {
   encryptedTitle: string;
   createdAt: number;
   isRead: boolean;
+  isDecrypted?: boolean;
+}
+
+export interface AppNotification {
+  id: string;
+  type: "friend_request" | "friend_accept" | "friend_reject" | "diary_shared";
+  title: string;
+  message: string;
+  createdAt: number;
+  isRead: boolean;
 }
 
 export interface UserProfile {

@@ -1,11 +1,12 @@
 import React, { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { get, onValue, ref, remove, set } from "firebase/database";
+import { get, onValue, ref, update } from "firebase/database";
 import { db } from "@/lib/firebase";
 import { useAuth } from "@/contexts/AuthContext";
 import { FriendRequest } from "@/types/diary";
 import { Check, X, UserPlus, Inbox } from "lucide-react";
 import { toast } from "sonner";
+import { createNotification } from "@/lib/notifications";
 
 interface FriendRequestWithSender extends FriendRequest {
   senderUid: string;
@@ -19,7 +20,6 @@ export default function FriendRequests() {
   const [rejectingUid, setRejectingUid] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Lắng nghe danh sách lời mời kết bạn
   useEffect(() => {
     if (!user?.uid) return;
 
@@ -33,35 +33,32 @@ export default function FriendRequests() {
         return;
       }
 
-      // Chuyển đổi dữ liệu Firebase thành mảng, bộ lọc chỉ pending status
       const requests = Object.entries(data)
         .filter(([_, value]: [string, any]) => value?.status === "pending")
         .map(([senderUid, value]: [string, any]) => ({
           id: senderUid,
-          senderUid: senderUid,
+          senderUid,
           fromUid: senderUid,
           fromName: value.senderName || t("dashboard.tab.myDiaries"),
           fromPublicKey: value.senderPublicKey,
           toUid: user.uid,
           status: "pending" as const,
           createdAt: value.createdAt || Date.now(),
-        } as FriendRequestWithSender));
+        }));
 
       setFriendRequests(requests);
       setLoading(false);
     });
 
     return () => unsubscribe();
-  }, [user?.uid]);
+  }, [user?.uid, t]);
 
-  // Xử lý chấp nhận lời mời (logic trao đổi chéo)
   const handleAcceptRequest = async (request: FriendRequestWithSender) => {
     if (!user) return;
 
     setAcceptingUid(request.senderUid);
 
     try {
-      // Bước 1: Lấy public key của chính mình từ users
       const myUserRef = ref(db, `users/${user.uid}`);
       const myUserSnapshot = await get(myUserRef);
 
@@ -74,20 +71,27 @@ export default function FriendRequests() {
         throw new Error(t("friendRequests.error_publickey"));
       }
 
-      // Bước 2: Lưu senderPublicKey vào contacts/{myUID}/{senderUID}
-      await set(ref(db, `contacts/${user.uid}/${request.senderUid}`), {
-        displayName: request.fromName,
-        publicKey: request.fromPublicKey,
+      await update(ref(db), {
+        [`contacts/${user.uid}/${request.senderUid}`]: {
+          displayName: request.fromName,
+          publicKey: request.fromPublicKey,
+        },
+        [`contacts/${request.senderUid}/${user.uid}`]: {
+          displayName: user.displayName || t("dashboard.tab.myDiaries"),
+          publicKey: myPublicKey,
+        },
+        [`friend_requests/${user.uid}/${request.senderUid}`]: null,
+        [`friend_requests/${request.senderUid}/${user.uid}`]: null,
       });
 
-      // Bước 3: Lưu myPublicKey vào contacts/{senderUID}/{myUID} (để người gửi cũng có thể gửi nật ký)
-      await set(ref(db, `contacts/${request.senderUid}/${user.uid}`), {
-        displayName: user.displayName || t("dashboard.tab.myDiaries"),
-        publicKey: myPublicKey,
+      await createNotification({
+        userUid: request.senderUid,
+        type: "friend_accept",
+        title: t("notifications.friend_accept_title"),
+        message: t("notifications.friend_accept_message", {
+          name: user.displayName || t("dashboard.tab.myDiaries"),
+        }),
       });
-
-      // Bước 4: Xóa lời mời khỏi friend_requests/{myUID}/{senderUID}
-      await remove(ref(db, `friend_requests/${user.uid}/${request.senderUid}`));
 
       toast.success(t("friendRequests.accepted", { name: request.fromName }));
     } catch (err: any) {
@@ -98,15 +102,24 @@ export default function FriendRequests() {
     }
   };
 
-  // Xử lý từ chối lời mời
   const handleRejectRequest = async (request: FriendRequestWithSender) => {
     if (!user) return;
 
     setRejectingUid(request.senderUid);
 
     try {
-      // Xóa lời mời khỏi friend_requests/{myUID}/{senderUID}
-      await remove(ref(db, `friend_requests/${user.uid}/${request.senderUid}`));
+      await update(ref(db), {
+        [`friend_requests/${user.uid}/${request.senderUid}`]: null,
+      });
+
+      await createNotification({
+        userUid: request.senderUid,
+        type: "friend_reject",
+        title: t("notifications.friend_reject_title"),
+        message: t("notifications.friend_reject_message", {
+          name: user.displayName || t("dashboard.tab.myDiaries"),
+        }),
+      });
 
       toast.success(t("friendRequests.rejected", { name: request.fromName }));
     } catch (err: any) {
@@ -158,7 +171,7 @@ export default function FriendRequests() {
                 <p className="font-medium text-foreground">{request.fromName}</p>
                 <p className="text-sm text-muted-foreground mt-1">
                   {t("friendRequests.sent_date", {
-                    date: new Date(request.createdAt).toLocaleDateString("vi-VN")
+                    date: new Date(request.createdAt).toLocaleDateString("vi-VN"),
                   })}
                 </p>
               </div>
@@ -171,7 +184,9 @@ export default function FriendRequests() {
                   title={t("friendRequests.accept_button")}
                 >
                   <Check className="w-4 h-4" />
-                  {acceptingUid === request.senderUid ? t("friendRequests.accepting") : t("friendRequests.accept_button")}
+                  {acceptingUid === request.senderUid
+                    ? t("friendRequests.accepting")
+                    : t("friendRequests.accept_button")}
                 </button>
 
                 <button
@@ -181,7 +196,9 @@ export default function FriendRequests() {
                   title={t("friendRequests.reject_button")}
                 >
                   <X className="w-4 h-4" />
-                  {rejectingUid === request.senderUid ? t("friendRequests.rejecting") : t("friendRequests.reject_button")}
+                  {rejectingUid === request.senderUid
+                    ? t("friendRequests.rejecting")
+                    : t("friendRequests.reject_button")}
                 </button>
               </div>
             </div>

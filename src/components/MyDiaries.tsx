@@ -6,7 +6,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { decryptMessage } from "@/lib/crypto";
 import { forceRichTextStyles } from "@/lib/utils";
 import { MOOD_CONFIG, Mood } from "@/types/diary";
-import { Lock, Unlock, BookOpen, Send, Inbox, Trash2, Reply } from "lucide-react";
+import { Lock, Unlock, BookOpen, Send, Inbox, Trash2, Reply, Eye, BadgeCheck } from "lucide-react";
 import { toast } from "sonner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import ConfirmDialog from "@/components/ConfirmDialog";
@@ -19,6 +19,7 @@ interface ReceivedDiary {
   encryptedContent: string;
   createdAt: number;
   isRead: boolean;
+  isDecrypted?: boolean;
   isTrashed?: boolean;
   trashedAt?: number;
 }
@@ -46,6 +47,8 @@ interface TrashTarget {
   isReceived: boolean;
 }
 
+type InboxVisualState = "new" | "decrypted" | "read";
+
 export default function MyDiaries() {
   const { t } = useTranslation();
   const { user } = useAuth();
@@ -53,6 +56,7 @@ export default function MyDiaries() {
   const [sentDiaries, setSentDiaries] = useState<SentDiary[]>([]);
   const [decrypted, setDecrypted] = useState<Record<string, DecryptedDiary>>({});
   const [decrypting, setDecrypting] = useState<string | null>(null);
+  const [markingReadId, setMarkingReadId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [trashTarget, setTrashTarget] = useState<TrashTarget | null>(null);
 
@@ -70,11 +74,12 @@ export default function MyDiaries() {
           .map(([id, value]: [string, any]) => ({
             id,
             fromUid: value.fromUid || "",
-            fromName: value.fromName || "Người dùng",
+            fromName: value.fromName || t("sendDiary.unknownFriend"),
             encryptedTitle: value.encryptedTitle || "",
             encryptedContent: value.encryptedContent || "",
             createdAt: value.createdAt || Date.now(),
             isRead: value.isRead || false,
+            isDecrypted: value.isDecrypted || false,
             isTrashed: value.isTrashed || false,
             trashedAt: value.trashedAt,
           }) as ReceivedDiary)
@@ -87,7 +92,7 @@ export default function MyDiaries() {
     });
 
     return () => unsubscribe();
-  }, [user?.uid]);
+  }, [user?.uid, t]);
 
   useEffect(() => {
     if (!user?.uid) return;
@@ -103,7 +108,7 @@ export default function MyDiaries() {
           .map(([id, value]: [string, any]) => ({
             id,
             toUid: value.toUid || "",
-            toName: value.toName || "Người dùng",
+            toName: value.toName || t("sendDiary.unknownFriend"),
             encryptedTitle: value.encryptedTitle || "",
             encryptedContent: value.encryptedContent || "",
             mood: value.mood || "calm",
@@ -119,21 +124,18 @@ export default function MyDiaries() {
     });
 
     return () => unsubscribe();
-  }, [user?.uid]);
+  }, [user?.uid, t]);
 
   const handleDecrypt = async (diary: ReceivedDiary) => {
     if (!user || decrypted[diary.id]) return;
     setDecrypting(diary.id);
 
     try {
-      const uid = user.uid;
-      const storageKey = `cozy:private-key:${uid}`;
+      const storageKey = `cozy:private-key:${user.uid}`;
       const privateKey = localStorage.getItem(storageKey);
 
       if (!privateKey) {
-        throw new Error(
-          "Không tìm thấy khóa riêng tư trong local storage. Vui lòng đăng nhập lại để tạo khóa mới.",
-        );
+        throw new Error(t("myDiaries.decryptError"));
       }
 
       const title = await decryptMessage(diary.encryptedTitle, privateKey);
@@ -145,7 +147,7 @@ export default function MyDiaries() {
         [diary.id]: { title, content, mood },
       }));
 
-      await update(ref(db, `sharedDiaries/${user.uid}/${diary.id}`), { isRead: true });
+      await update(ref(db, `sharedDiaries/${user.uid}/${diary.id}`), { isDecrypted: true });
 
       toast.success(t("myDiaries.decryptSuccess"));
     } catch (err: any) {
@@ -153,6 +155,21 @@ export default function MyDiaries() {
       toast.error(err.message || t("myDiaries.decryptError"));
     } finally {
       setDecrypting(null);
+    }
+  };
+
+  const handleMarkAsRead = async (diaryId: string) => {
+    if (!user) return;
+
+    setMarkingReadId(diaryId);
+    try {
+      await update(ref(db, `sharedDiaries/${user.uid}/${diaryId}`), { isRead: true, isDecrypted: true });
+      toast.success(t("myDiaries.markReadSuccess"));
+    } catch (error) {
+      console.error("Mark read error:", error);
+      toast.error(t("myDiaries.markReadError"));
+    } finally {
+      setMarkingReadId(null);
     }
   };
 
@@ -181,17 +198,34 @@ export default function MyDiaries() {
 
   const handleReply = (diary: ReceivedDiary) => {
     localStorage.setItem(
-      "cozy_reply_target",
+      "cozy_share_target",
       JSON.stringify({
         uid: diary.fromUid,
-        name: diary.fromName,
       }),
     );
 
-    window.dispatchEvent(new Event("trigger_compose_diary"));
+    window.dispatchEvent(new Event("trigger_share_diary"));
     window.dispatchEvent(new CustomEvent("change_main_tab", { detail: "shared" }));
 
     toast.success(t("myDiaries.replyingTo", { name: diary.fromName }));
+  };
+
+  const getInboxVisualState = (diary: ReceivedDiary): InboxVisualState => {
+    if (!diary.isDecrypted && !diary.isRead) return "new";
+    if (diary.isDecrypted && !diary.isRead) return "decrypted";
+    return "read";
+  };
+
+  const renderStateBadge = (state: InboxVisualState) => {
+    if (state === "new") {
+      return <span className="px-2 py-1 rounded-full bg-primary/15 text-primary text-xs font-semibold">{t("myDiaries.stateNew")}</span>;
+    }
+
+    if (state === "decrypted") {
+      return <span className="px-2 py-1 rounded-full bg-amber-500/15 text-amber-700 text-xs font-semibold dark:text-amber-300">{t("myDiaries.stateDecrypted")}</span>;
+    }
+
+    return <span className="px-2 py-1 rounded-full bg-secondary text-muted-foreground text-xs font-medium">{t("myDiaries.stateRead")}</span>;
   };
 
   if (loading) {
@@ -234,28 +268,29 @@ export default function MyDiaries() {
             <div className="text-center py-10">
               <Inbox className="w-14 h-14 text-muted-foreground/30 mx-auto mb-4" />
               <p className="text-muted-foreground text-base">{t("myDiaries.emptyReceived")}</p>
-              <p className="text-sm text-muted-foreground/70 mt-3">
-                {t("myDiaries.emptyReceivedDetail")}
-              </p>
+              <p className="text-sm text-muted-foreground/70 mt-3">{t("myDiaries.emptyReceivedDetail")}</p>
             </div>
           ) : (
             <div className="space-y-6">
               {receivedDiaries.map((diary) => {
                 const dec = decrypted[diary.id];
+                const state = getInboxVisualState(diary);
+                const cardClass =
+                  state === "new"
+                    ? "border-primary/40 bg-primary/5"
+                    : state === "decrypted"
+                      ? "border-amber-400/40 bg-amber-500/5"
+                      : "border-border bg-secondary/20";
+
                 return (
-                  <div
-                    key={diary.id}
-                    className="border border-border rounded-xl p-6 bg-secondary/20 hover:bg-secondary/30 transition-colors"
-                  >
+                  <div key={diary.id} className={`border rounded-xl p-6 transition-colors ${cardClass}`}>
                     <div className="flex items-start justify-between gap-4">
                       <div className="flex-1">
-                        <div className="flex items-center gap-2 mb-3">
-                          <span className="text-base font-medium text-foreground">
+                        <div className="flex flex-wrap items-center gap-2 mb-3">
+                          <span className={`text-base text-foreground ${state === "new" ? "font-bold" : "font-medium"}`}>
                             {t("myDiaries.from")}: {diary.fromName}
                           </span>
-                          {!diary.isRead && !dec && (
-                            <span className="w-2.5 h-2.5 rounded-full bg-accent animate-pulse" />
-                          )}
+                          {renderStateBadge(state)}
                           <span className="text-sm text-muted-foreground">
                             {new Date(diary.createdAt).toLocaleDateString("vi-VN", {
                               day: "2-digit",
@@ -269,18 +304,16 @@ export default function MyDiaries() {
 
                         {dec ? (
                           <div className="animate-fade-in">
-                            <div className="flex items-center gap-2 mb-3">
+                            <div className="flex flex-wrap items-center gap-2 mb-3">
                               <Unlock className="w-5 h-5 text-mood-calm" />
-                              <span className="text-sm text-mood-calm font-medium">
-                                {t("myDiaries.decrypted")}
-                              </span>
+                              <span className="text-sm text-mood-calm font-medium">{t("myDiaries.decrypted")}</span>
                               {dec.mood && (
                                 <span className={`mood-chip ${MOOD_CONFIG[dec.mood]?.colorClass}`}>
                                   {MOOD_CONFIG[dec.mood]?.emoji} {MOOD_CONFIG[dec.mood]?.label}
                                 </span>
                               )}
                             </div>
-                            <h4 className="font-display font-semibold text-foreground text-lg mb-3">
+                            <h4 className={`font-display text-lg mb-3 ${state === "new" ? "font-bold" : "font-semibold"} text-foreground`}>
                               {dec.title}
                             </h4>
                             <div
@@ -292,9 +325,7 @@ export default function MyDiaries() {
                           <div>
                             <div className="flex items-center gap-2 mb-3">
                               <Lock className="w-5 h-5 text-accent" />
-                              <span className="text-sm text-accent font-medium">
-                                {t("myDiaries.rsaEncrypted")}
-                              </span>
+                              <span className="text-sm text-accent font-medium">{t("myDiaries.rsaEncrypted")}</span>
                             </div>
                             <div className="bg-secondary/50 rounded-lg p-4">
                               <code className="text-sm text-muted-foreground break-all line-clamp-3">
@@ -305,7 +336,7 @@ export default function MyDiaries() {
                         )}
                       </div>
 
-                      <div className="flex items-center gap-3 shrink-0 mt-3 sm:mt-0">
+                      <div className="flex flex-col items-stretch gap-3 shrink-0 mt-3 sm:mt-0">
                         {!dec ? (
                           <button
                             onClick={() => handleDecrypt(diary)}
@@ -316,7 +347,23 @@ export default function MyDiaries() {
                             <Unlock className="w-4 h-4" />
                             {decrypting === diary.id ? t("myDiaries.decrypting") : t("myDiaries.decrypt")}
                           </button>
+                        ) : !diary.isRead ? (
+                          <button
+                            onClick={() => handleMarkAsRead(diary.id)}
+                            disabled={markingReadId === diary.id}
+                            className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-amber-500 text-white text-sm font-medium border border-amber-400/30 hover:-translate-y-0.5 hover:shadow-md active:translate-y-0 active:shadow-sm transition-all duration-200 disabled:opacity-50"
+                          >
+                            <Eye className="w-4 h-4" />
+                            {markingReadId === diary.id ? t("myDiaries.markingRead") : t("myDiaries.markRead")}
+                          </button>
                         ) : (
+                          <div className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-secondary text-muted-foreground text-sm font-medium">
+                            <BadgeCheck className="w-4 h-4" />
+                            {t("myDiaries.stateRead")}
+                          </div>
+                        )}
+
+                        {dec && (
                           <button
                             onClick={() => handleReply(diary)}
                             className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-blue-500 text-white text-sm font-medium border border-blue-400/30 hover:-translate-y-0.5 hover:shadow-md active:translate-y-0 active:shadow-sm transition-all duration-200"
@@ -326,6 +373,7 @@ export default function MyDiaries() {
                             {t("myDiaries.reply")}
                           </button>
                         )}
+
                         <button
                           onClick={() => setTrashTarget({ diary, isReceived: true })}
                           className="flex items-center gap-2 px-4 py-2.5 rounded-xl border border-red-500 text-red-500 text-sm font-medium hover:-translate-y-0.5 hover:shadow-md hover:bg-red-50 active:translate-y-0 active:shadow-sm transition-all duration-200 dark:hover:bg-red-950/30"
@@ -348,17 +396,12 @@ export default function MyDiaries() {
             <div className="text-center py-10">
               <Send className="w-14 h-14 text-muted-foreground/30 mx-auto mb-4" />
               <p className="text-muted-foreground text-base">{t("myDiaries.emptySent")}</p>
-              <p className="text-sm text-muted-foreground/70 mt-3">
-                {t("myDiaries.emptySentDetail")}
-              </p>
+              <p className="text-sm text-muted-foreground/70 mt-3">{t("myDiaries.emptySentDetail")}</p>
             </div>
           ) : (
             <div className="space-y-6">
               {sentDiaries.map((diary) => (
-                <div
-                  key={diary.id}
-                  className="border border-border rounded-xl p-6 bg-secondary/20 hover:bg-secondary/30 transition-colors"
-                >
+                <div key={diary.id} className="border border-border rounded-xl p-6 bg-secondary/20 hover:bg-secondary/30 transition-colors">
                   <div className="flex items-start justify-between gap-4">
                     <div className="flex-1">
                       <div className="flex items-center gap-2 mb-3">
@@ -379,9 +422,7 @@ export default function MyDiaries() {
                       <div>
                         <div className="flex items-center gap-2 mb-3">
                           <Lock className="w-5 h-5 text-accent" />
-                          <span className="text-sm text-accent font-medium">
-                            {t("myDiaries.rsaEncrypted")}
-                          </span>
+                          <span className="text-sm text-accent font-medium">{t("myDiaries.rsaEncrypted")}</span>
                           {diary.mood && (
                             <span className={`mood-chip ${MOOD_CONFIG[diary.mood]?.colorClass}`}>
                               {MOOD_CONFIG[diary.mood]?.emoji} {MOOD_CONFIG[diary.mood]?.label}

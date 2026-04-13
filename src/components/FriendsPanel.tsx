@@ -1,13 +1,14 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { equalTo, get, onValue, orderByChild, query, ref, remove, set } from "firebase/database";
+import { equalTo, get, onValue, orderByChild, query, ref, update } from "firebase/database";
 import { db } from "@/lib/firebase";
 import { useAuth } from "@/contexts/AuthContext";
 import { Friend } from "@/types/diary";
-import { Search, UserPlus, Users, Key, Copy, Trash2 } from "lucide-react";
+import { Search, UserPlus, Users, Key, Copy, Trash2, Clock3, CheckCircle2, Inbox } from "lucide-react";
 import { toast } from "sonner";
 import { formatPublicKey } from "@/lib/utils";
 import ConfirmDialog from "@/components/ConfirmDialog";
+import { createNotification } from "@/lib/notifications";
 
 interface Props {
   entries?: unknown[];
@@ -20,6 +21,43 @@ interface SearchResult {
   publicKey: string;
 }
 
+type SearchRelationshipStatus = "ready" | "friends" | "sent" | "incoming";
+
+const STATUS_CONFIG: Record<
+  SearchRelationshipStatus,
+  {
+    icon: typeof UserPlus;
+    buttonClass: string;
+    labelKey: string;
+    disabled: boolean;
+  }
+> = {
+  ready: {
+    icon: UserPlus,
+    buttonClass: "bg-primary text-primary-foreground",
+    labelKey: "friends.send_invite_button",
+    disabled: false,
+  },
+  sent: {
+    icon: Clock3,
+    buttonClass: "bg-muted text-muted-foreground",
+    labelKey: "friends.invite_sent_button",
+    disabled: true,
+  },
+  friends: {
+    icon: CheckCircle2,
+    buttonClass: "bg-muted text-muted-foreground",
+    labelKey: "friends.already_friends_button",
+    disabled: true,
+  },
+  incoming: {
+    icon: Inbox,
+    buttonClass: "bg-muted text-muted-foreground",
+    labelKey: "friends.incoming_invite_button",
+    disabled: true,
+  },
+};
+
 export default function FriendsPanel(_: Props) {
   const { t } = useTranslation();
   const { user } = useAuth();
@@ -28,6 +66,7 @@ export default function FriendsPanel(_: Props) {
   const [sendingInvite, setSendingInvite] = useState(false);
   const [removingUid, setRemovingUid] = useState<string | null>(null);
   const [searchResult, setSearchResult] = useState<SearchResult | null>(null);
+  const [searchRelationshipStatus, setSearchRelationshipStatus] = useState<SearchRelationshipStatus>("ready");
   const [friends, setFriends] = useState<Friend[]>([]);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
@@ -57,6 +96,25 @@ export default function FriendsPanel(_: Props) {
     return () => unsubscribe();
   }, [user]);
 
+  const friendUidSet = useMemo(() => new Set(friends.map((friend) => friend.uid)), [friends]);
+
+  const determineRelationshipStatus = async (targetUid: string): Promise<SearchRelationshipStatus> => {
+    if (!user?.uid) return "ready";
+    if (friendUidSet.has(targetUid)) return "friends";
+
+    const outgoingSnapshot = await get(ref(db, `friend_requests/${targetUid}/${user.uid}`));
+    if (outgoingSnapshot.exists() && outgoingSnapshot.val()?.status === "pending") {
+      return "sent";
+    }
+
+    const incomingSnapshot = await get(ref(db, `friend_requests/${user.uid}/${targetUid}`));
+    if (incomingSnapshot.exists() && incomingSnapshot.val()?.status === "pending") {
+      return "incoming";
+    }
+
+    return "ready";
+  };
+
   const handleSearch = async () => {
     if (!user) return;
 
@@ -64,6 +122,7 @@ export default function FriendsPanel(_: Props) {
     if (!normalizedEmail) {
       setError(t("friends.error_empty_email"));
       setSearchResult(null);
+      setSearchRelationshipStatus("ready");
       return;
     }
 
@@ -71,6 +130,7 @@ export default function FriendsPanel(_: Props) {
     setError("");
     setSuccess("");
     setSearchResult(null);
+    setSearchRelationshipStatus("ready");
 
     try {
       const usersQuery = query(ref(db, "users"), orderByChild("email"), equalTo(normalizedEmail));
@@ -88,12 +148,24 @@ export default function FriendsPanel(_: Props) {
         return;
       }
 
-      setSearchResult({
+      const nextResult = {
         uid,
         displayName: userData.displayName || t("dashboard.tab.myDiaries"),
         email: userData.email,
         publicKey: userData.publicKey,
-      });
+      };
+
+      const nextStatus = await determineRelationshipStatus(uid);
+      setSearchResult(nextResult);
+      setSearchRelationshipStatus(nextStatus);
+
+      if (nextStatus === "friends") {
+        setSuccess(t("friends.already_friends"));
+      } else if (nextStatus === "sent") {
+        setSuccess(t("friends.invite_already_sent"));
+      } else if (nextStatus === "incoming") {
+        setSuccess(t("friends.invite_received_pending"));
+      }
     } catch (err: any) {
       setError(err.message || t("friends.error_search"));
     } finally {
@@ -102,31 +174,54 @@ export default function FriendsPanel(_: Props) {
   };
 
   const handleSendFriendRequest = async () => {
-    if (!user || !searchResult) return;
+    if (!user || !searchResult || searchRelationshipStatus !== "ready" || sendingInvite) return;
 
     setSendingInvite(true);
     setError("");
     setSuccess("");
 
     try {
+      const latestStatus = await determineRelationshipStatus(searchResult.uid);
+      if (latestStatus !== "ready") {
+        setSearchRelationshipStatus(latestStatus);
+        if (latestStatus === "friends") {
+          setSuccess(t("friends.already_friends"));
+        } else if (latestStatus === "sent") {
+          setSuccess(t("friends.invite_already_sent"));
+        } else {
+          setSuccess(t("friends.invite_received_pending"));
+        }
+        return;
+      }
+
       const currentUserSnapshot = await get(ref(db, `users/${user.uid}`));
       const currentUserData = currentUserSnapshot.val();
 
       if (!currentUserSnapshot.exists()) {
-        throw new Error(t("sendDiary.noFriends"));
+        throw new Error(t("friends.error_account"));
       }
 
-      await set(ref(db, `friend_requests/${searchResult.uid}/${user.uid}`), {
-        status: "pending",
-        senderEmail: currentUserData.email || user.email || "",
-        senderName: currentUserData.displayName || user.displayName || t("dashboard.tab.myDiaries"),
-        senderPublicKey: currentUserData.publicKey,
-        createdAt: Date.now(),
+      await update(ref(db), {
+        [`friend_requests/${searchResult.uid}/${user.uid}`]: {
+          status: "pending",
+          senderEmail: currentUserData.email || user.email || "",
+          senderName: currentUserData.displayName || user.displayName || t("dashboard.tab.myDiaries"),
+          senderPublicKey: currentUserData.publicKey,
+          createdAt: Date.now(),
+        },
       });
 
+      await createNotification({
+        userUid: searchResult.uid,
+        type: "friend_request",
+        title: t("notifications.friend_request_title"),
+        message: t("notifications.friend_request_message", {
+          name: currentUserData.displayName || user.displayName || t("dashboard.tab.myDiaries"),
+        }),
+      });
+
+      setSearchRelationshipStatus("sent");
       setSuccess(t("friends.invite_sent"));
-      setSearchResult(null);
-      setEmailInput("");
       toast.success(t("friends.invite_sent"));
     } catch (err: any) {
       setError(err.message || t("friends.error_search"));
@@ -152,8 +247,12 @@ export default function FriendsPanel(_: Props) {
     setSuccess("");
 
     try {
-      await remove(ref(db, `contacts/${user.uid}/${friend.uid}`));
-      await remove(ref(db, `contacts/${friend.uid}/${user.uid}`));
+      await update(ref(db), {
+        [`contacts/${user.uid}/${friend.uid}`]: null,
+        [`contacts/${friend.uid}/${user.uid}`]: null,
+        [`friend_requests/${user.uid}/${friend.uid}`]: null,
+        [`friend_requests/${friend.uid}/${user.uid}`]: null,
+      });
 
       setSuccess(t("friends.removed", { name: friend.displayName }));
       toast.success(t("friends.removed", { name: friend.displayName }));
@@ -166,6 +265,9 @@ export default function FriendsPanel(_: Props) {
       setFriendToRemove(null);
     }
   };
+
+  const statusConfig = STATUS_CONFIG[searchRelationshipStatus];
+  const StatusIcon = statusConfig.icon;
 
   return (
     <div className="space-y-5 animate-fade-in">
@@ -200,11 +302,11 @@ export default function FriendsPanel(_: Props) {
             <p className="text-sm text-muted-foreground mt-1">{searchResult.email}</p>
             <button
               onClick={handleSendFriendRequest}
-              disabled={sendingInvite}
-              className="mt-3 inline-flex items-center gap-2 px-4 py-3 rounded-xl bg-primary text-primary-foreground text-base font-medium disabled:opacity-50"
+              disabled={sendingInvite || statusConfig.disabled}
+              className={`mt-3 inline-flex items-center gap-2 px-4 py-3 rounded-xl text-base font-medium disabled:opacity-50 ${statusConfig.buttonClass}`}
             >
-              <UserPlus className="w-4 h-4" />
-              {sendingInvite ? t("friends.sending_invite") : t("friends.send_invite_button")}
+              <StatusIcon className="w-4 h-4" />
+              {sendingInvite ? t("friends.sending_invite") : t(statusConfig.labelKey)}
             </button>
           </div>
         )}

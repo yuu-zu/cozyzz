@@ -6,6 +6,7 @@ import { Shield, LogOut, Moon, Sun, Download, Settings, Globe } from "lucide-rea
 import { useLocation } from "react-router-dom";
 import { ref, get } from "firebase/database";
 import { db } from "@/lib/firebase";
+import NotificationBell from "@/components/NotificationBell";
 
 interface Props {
   onOpenSettings?: () => void;
@@ -76,6 +77,7 @@ export default function NavBar({ onOpenSettings }: Props) {
             <Globe className="w-4 h-4" />
             <span>{isVietnamese ? "EN" : "VN"}</span>
           </button>
+          <NotificationBell />
           <button
             onClick={handleBackup}
             className="p-2 rounded-xl hover:bg-secondary/50 text-muted-foreground hover:text-foreground transition-colors"
